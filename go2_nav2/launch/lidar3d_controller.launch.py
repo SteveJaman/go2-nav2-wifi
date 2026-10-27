@@ -24,24 +24,29 @@ def configure(context):
                   min_theta_velocity_threshold=0.02)
     params['progress_checker']['movement_time_allowance'] = 35.0
     params['general_goal_checker']['xy_goal_tolerance'] = 0.25
-    params['FollowPath'].update(min_vel_x=0.0, max_vel_x=0.30, min_vel_y=0.0,
-        max_vel_y=0.0, max_vel_theta=0.70, max_speed_xy=0.30,
-        acc_lim_x=0.6, decel_lim_x=-0.6, acc_lim_y=0.3, decel_lim_y=-0.3,
-        acc_lim_theta=1.0, decel_lim_theta=-1.0, vy_samples=1,
-        transform_tolerance=0.3, xy_goal_tolerance=0.25,
-        critics=['Oscillation', 'ObstacleFootprint', 'PathAlign', 'GoalAlign', 'PathDist', 'GoalDist'])
-    params['FollowPath'].update(
-        plugin='nav2_rotation_shim_controller::RotationShimController',
-        primary_controller='dwb_core::DWBLocalPlanner',
-        angular_dist_threshold=0.5, angular_disengage_threshold=0.25,
-        forward_sampling_distance=0.5, rotate_to_heading_angular_vel=0.70,
-        max_angular_accel=1.0, simulate_ahead_time=2.0,
-        rotate_to_goal_heading=False, closed_loop=False)
-    # Heading critics from the community Go2 DWB profile: turning toward a path
-    # must improve its score even when the body centre has not translated yet.
-    params['FollowPath'].update({'PathAlign.scale': 32.0,
-        'PathAlign.forward_point_distance': 0.1,
-        'GoalAlign.scale': 24.0, 'GoalAlign.forward_point_distance': 0.1})
+    # Regulated Pure Pursuit behind the rotation shim. RPP follows the path
+    # geometrically and does not build its command window from measured odom
+    # velocity, so noisy Point-LIO-derived twist cannot make it jitter like DWB.
+    params['FollowPath'] = {
+        'plugin': 'nav2_rotation_shim_controller::RotationShimController',
+        'primary_controller': 'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController',
+        # Wider hysteresis: rotate in place only for large errors, hand back early.
+        'angular_dist_threshold': 0.5, 'angular_disengage_threshold': 0.2,
+        'forward_sampling_distance': 0.5, 'rotate_to_heading_angular_vel': 0.6,
+        'max_angular_accel': 1.0, 'simulate_ahead_time': 1.0,
+        'rotate_to_goal_heading': False, 'closed_loop': False,
+        'desired_linear_vel': 0.30,
+        'lookahead_dist': 0.6, 'min_lookahead_dist': 0.4, 'max_lookahead_dist': 0.9,
+        'lookahead_time': 1.5, 'use_velocity_scaled_lookahead_dist': False,
+        'transform_tolerance': 0.3,
+        'min_approach_linear_velocity': 0.08, 'approach_velocity_scaling_dist': 0.6,
+        'use_collision_detection': True, 'max_allowed_time_to_collision_up_to_carrot': 1.0,
+        'use_regulated_linear_velocity_scaling': True,
+        'use_cost_regulated_linear_velocity_scaling': False,
+        'regulated_linear_scaling_min_radius': 0.6, 'regulated_linear_scaling_min_speed': 0.12,
+        'use_rotate_to_heading': False,  # the shim handles rotation
+        'allow_reversing': False, 'max_robot_pose_search_dist': 3.0,
+    }
     with open(pkg + '/config/lidar3d_planner.yaml') as stream:
         local = copy.deepcopy(yaml.safe_load(stream)['global_costmap']['global_costmap'])
     cost = local['ros__parameters']
@@ -53,7 +58,7 @@ def configure(context):
     cost.pop('robot_radius', None)
     cost['obstacle_layer']['lidar']['expected_update_rate'] = 0.8
     cost['obstacle_layer']['lidar']['topic'] = '/lidar3d/obstacle_points'
-    cost['inflation_layer']['inflation_radius'] = 0.55
+    cost['inflation_layer']['inflation_radius'] = 0.22
     fd, path = tempfile.mkstemp(prefix='go2-lidar3d-controller-', suffix='.yaml')
     with os.fdopen(fd, 'w') as stream:
         yaml.safe_dump({'controller_server': controller, 'local_costmap': {'local_costmap': local}}, stream)
@@ -69,11 +74,23 @@ def configure(context):
     return [
         RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(function=cleanup)])),
         Node(package='go2_nav2', executable='go2_odom_tf', name='lidar3d_body_odom', parameters=[odom]),
+        # Controller output goes through the smoother; only the smoother publishes /cmd_vel.
         Node(package='nav2_controller', executable='controller_server', name='controller_server',
-             output='screen', parameters=[path]),
+             output='screen', parameters=[path], remappings=[('cmd_vel', 'cmd_vel_nav')]),
+        Node(package='nav2_velocity_smoother', executable='velocity_smoother', name='velocity_smoother',
+             output='screen',
+             remappings=[('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')],
+             parameters=[{
+                 'smoothing_frequency': 20.0, 'scale_velocities': True,
+                 'feedback': 'OPEN_LOOP',  # never trust the noisy measured twist
+                 'max_velocity': [0.30, 0.0, 0.70], 'min_velocity': [-0.30, 0.0, -0.70],
+                 'max_accel': [0.5, 0.0, 0.8], 'max_decel': [-0.5, 0.0, -0.8],
+                 # Go2 steps in place on tiny commands; zero them instead.
+                 'deadband_velocity': [0.03, 0.0, 0.08],
+                 'velocity_timeout': 1.0}]),
         Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
              name='lifecycle_manager_lidar3d_controller', parameters=[{
-                 'autostart': True, 'node_names': ['controller_server'], 'bond_timeout': 4.0}]),
+                 'autostart': True, 'node_names': ['controller_server', 'velocity_smoother'], 'bond_timeout': 4.0}]),
         Node(package='go2_nav2', executable='go2_goal_pose_nav', name='go2_goal_pose_nav',
              output='screen', parameters=[{'map_frame': 'lidar3d_map', 'pre_rotate_enable': False}]),
     ]

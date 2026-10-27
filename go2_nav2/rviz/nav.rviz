@@ -3,6 +3,8 @@ Panels:
     Name: Displays
   - Class: rviz_common/Views
     Name: Views
+  - Class: go2_explore_panel/ExplorePanel
+    Name: Go2 Explore
 Visualization Manager:
   Class: ""
   Displays:
