@@ -45,7 +45,7 @@ def configure(context):
         }
         cost['inflation_layer']['inflation_radius'] = 0.55
         cost['transform_tolerance'] = 0.3
-        cost['obstacle_layer']['lidar']['expected_update_rate'] = 0.8
+        cost['obstacle_layer']['lidar']['expected_update_rate'] = 2.0  # go2-wifi-lidar was: cost['obstacle_layer']['lidar']['expected_update_rate'] = 0.8
     data['planner_server'] = planner
     fd, path = tempfile.mkstemp(prefix='go2-lidar3d-planner-', suffix='.yaml')
     with os.fdopen(fd, 'w') as stream:

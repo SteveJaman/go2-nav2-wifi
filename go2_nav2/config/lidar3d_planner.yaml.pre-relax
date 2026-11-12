@@ -1,0 +1,105 @@
+# Online rolling 2D planning from Point-LIO scans.
+# Height limits are in the initially levelled lidar3d_map.
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: lidar3d_map
+      robot_base_frame: base_link
+      transform_tolerance: 1.0
+      update_frequency: 4.0
+      publish_frequency: 2.0
+      rolling_window: true
+      width: 30
+      height: 30
+      resolution: 0.1
+      track_unknown_space: true
+      
+      # Robot physical size. 0.35 is a safe circle radius for the Go2.
+      robot_radius: 0.45 
+      
+      plugins: [obstacle_layer, inflation_layer]
+      
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: lidar yolo
+        yolo:   # wifi_3d_nav.sh: YOLO obstacles (add-yolo-costmap-source.sh)
+          topic: /yolo/obstacles
+          data_type: PointCloud2
+          marking: true
+          clearing: false
+          min_obstacle_height: -10.0
+          max_obstacle_height: 10.0
+          obstacle_max_range: 6.0
+          expected_update_rate: 0.0
+        lidar:
+          topic: /lidar3d/registered
+          sensor_frame: lidar3d_sensor
+          data_type: PointCloud2
+          marking: true
+          clearing: true
+          # FIX: Lowered min height to 0.12 to catch cabinet bases and chair legs
+          min_obstacle_height: 0.12  
+          max_obstacle_height: 1.5
+          obstacle_min_range: 0.35
+          obstacle_max_range: 12.0
+          raytrace_min_range: 0.35
+          raytrace_max_range: 5.0
+          observation_persistence: 0.0
+          
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        # FIX: 0.75 is a good balance. If it still hits, try 0.85. If it gets stuck in doors, try 0.65.
+        inflation_radius: 0.55
+        cost_scaling_factor: 2.5 
+        
+      always_send_full_costmap: true
+
+# -------------------------------------------------------------------------
+# LOCAL COSTMAP: This is what actually prevents the immediate collisions!
+# -------------------------------------------------------------------------
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      global_frame: odom
+      robot_base_frame: base_link
+      transform_tolerance: 1.0
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      track_unknown_space: false
+      
+      robot_radius: 0.35
+      
+      plugins: [obstacle_layer, inflation_layer]
+      
+      obstacle_layer:
+        plugin: nav2_costmap_2d::ObstacleLayer
+        observation_sources: lidar
+        lidar:
+          topic: /lidar3d/registered
+          sensor_frame: lidar3d_sensor
+          data_type: PointCloud2
+          marking: true
+          clearing: true
+          # FIX: Must match the global costmap so the local controller sees the cabinet base
+          min_obstacle_height: 0.12
+          max_obstacle_height: 1.5
+          obstacle_min_range: 0.30
+          obstacle_max_range: 5.0
+          raytrace_min_range: 0.30
+          raytrace_max_range: 5.0
+          observation_persistence: 0.0
+          
+      inflation_layer:
+        plugin: nav2_costmap_2d::InflationLayer
+        # FIX: Matches global costmap inflation
+        inflation_radius: 0.75
+        cost_scaling_factor: 2.5
+        
+      always_send_full_costmap: true

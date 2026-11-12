@@ -129,26 +129,41 @@ if [[ "$mapping_mode" == lidar3d && "$compute" == jetson ]]; then session_mode=l
 x_added=0
 cleanup() {
   trap '' INT TERM HUP
+  echo "Stopping safely: the robot first, then the maps are saved (a minute at most). A second Ctrl+C only skips copying the map from the Jetson." >&2  # go2-agri: stop timeouts
+  [[ -z "${GO2_STOP_EARLY:-}" ]] || { docker stop -t 60 $GO2_STOP_EARLY >/dev/null 2>&1 & }  # go2-agri: stop timeouts
   if [[ -n "$motion_pid" ]]; then
     kill -TERM "$motion_pid" 2>/dev/null || true
     wait "$motion_pid" 2>/dev/null || true
   fi
   if [[ "$mapping_started" == 1 ]]; then
-    docker exec "$GO2_CONTAINER" bash /ws/scripts/go2-session.sh stop "$session_mode" --owner "$owner" >/dev/null 2>&1 || true
+    echo "Stopping the local Nav2/RViz session (up to 60 s, alongside the Jetson)..." >&2  # go2-agri: stop timeouts
+    { timeout -k 5 60 docker exec "$GO2_CONTAINER" bash /ws/scripts/go2-session.sh stop "$session_mode" --owner "$owner" >/dev/null 2>&1 || true; } &  # go2-agri: stop timeouts
+    local_stop_pid=$!  # go2-agri: stop timeouts
   fi
   if [[ "$jetson_started" == 1 ]]; then
-    ssh -o BatchMode=yes -S "$ssh_socket" "$target" "docker exec go2-lidar3d-onboard bash /ws/scripts/go2-session.sh stop lidar3d --owner $owner" >/dev/null 2>&1 || true
+    echo "Stopping SLAM on the Jetson and saving its map (up to ${GO2_STOP_TIMEOUT:-120} s)..." >&2  # go2-agri: stop timeouts
+    timeout -k 5 "${GO2_STOP_TIMEOUT:-120}" ssh -o BatchMode=yes -S "$ssh_socket" "$target" "docker exec go2-lidar3d-onboard bash /ws/scripts/go2-session.sh stop lidar3d --owner $owner" >/dev/null 2>&1 || echo "Jetson stop did not finish (link down?): run ./scripts/runtime/wifi_nav.sh --clean before the next session" >&2  # go2-agri: stop timeouts
     saved_run="$(sed -n 's@^3D result directory: /ws/maps/lidar3d/\(run-[a-zA-Z0-9_-]*\).*@\1@p' "$log_dir/slam.log" | head -1)"
     if [[ -n "$saved_run" ]] && grep -q '^Result validation failed' "$log_dir/slam.log"; then
       echo "3D session produced no complete map; partial result remains on Jetson: $saved_run" >&2
     elif [[ -n "$saved_run" ]]; then
-      python3 "$MAPPING_ROOT/ws/scripts/fetch-lidar3d.py" --target "$target" --ssh-socket "$ssh_socket" \
-        --run "$saved_run" --destination "$MAPPING_ROOT/ws/maps/lidar3d" || \
+      echo "Copying the 3D map from the Jetson (up to ${GO2_FETCH_TIMEOUT:-600} s). Ctrl+C skips this: the map stays on the Jetson; fetch it later with:" >&2  # go2-agri: stop timeouts
+      echo "        python3 $MAPPING_ROOT/ws/scripts/fetch-lidar3d.py --target $target --run $saved_run" >&2  # go2-agri: stop timeouts
+       # go2-agri: stop timeouts
+      timeout -k 5 "${GO2_FETCH_TIMEOUT:-600}" python3 "$MAPPING_ROOT/ws/scripts/fetch-lidar3d.py" --target "$target" --ssh-socket "$ssh_socket" \
+        --run "$saved_run" --destination "$MAPPING_ROOT/ws/maps/lidar3d" &  # go2-agri: stop timeouts
+      fetch_pid=$!  # go2-agri: stop timeouts
+      trap 'kill -TERM "$fetch_pid" 2>/dev/null; echo "Transfer skipped (Ctrl+C): the map stays on the Jetson." >&2' INT  # go2-agri: stop timeouts
+      fetch_rc=0; wait "$fetch_pid" || fetch_rc=$?  # go2-agri: stop timeouts
+      while kill -0 "$fetch_pid" 2>/dev/null; do fetch_rc=0; wait "$fetch_pid" || fetch_rc=$?; done  # go2-agri: stop timeouts
+      trap '' INT  # go2-agri: stop timeouts
+      [[ "$fetch_rc" == 0 ]] ||  # go2-agri: stop timeouts
         echo "Transfer incomplete: results remain on Jetson; see $log_dir/slam.log" >&2
     fi
   fi
   # Private SSH master: closes only the remote relay started by this invocation.
-  ssh -S "$ssh_socket" -O exit "$target" >/dev/null 2>&1 || true
+  [[ -z "${local_stop_pid:-}" ]] || wait "$local_stop_pid" 2>/dev/null || true  # go2-agri: stop timeouts
+  timeout -k 2 10 ssh -S "$ssh_socket" -O exit "$target" >/dev/null 2>&1 || true  # go2-agri: stop timeouts
   [[ "$x_added" == 0 ]] || xhost "-SI:localuser:$xuser" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -159,7 +174,7 @@ echo "Connecting to $target (SSH may ask for your robot password)..."
 if [[ "$mapping_mode" == lidar3d && "$backend" == pointlio ]]; then
   echo "Keep the robot still until the first 3D map appears; initialization takes a few seconds."
 fi
-ssh -o ConnectTimeout=8 -o ControlMaster=yes -o ControlPersist=60 -S "$ssh_socket" "$target" true
+ssh -o ConnectTimeout=8 -o ControlMaster=yes -o ControlPersist=60 -o ServerAliveInterval=10 -o ServerAliveCountMax=6 -S "$ssh_socket" "$target" true  # go2-agri: stop timeouts
 if [[ "$mapping_mode" == lidar3d && "$compute" == jetson ]]; then
   if [[ "$backend" == pointlio_leg ]]; then
     ssh -o BatchMode=yes -S "$ssh_socket" "$target" \
@@ -192,7 +207,7 @@ if [[ "$mapping_mode" == lidar3d && "$compute" == jetson ]]; then
         "$MAPPING_ROOT/ws/scripts/robot_sport_bridge.py" "$MAPPING_ROOT/ws/scripts/go2_cmd_vel_tcp.py" \
         "$MAPPING_ROOT/ws/scripts/robot-source-unitree-ros.sh" "$target:go2-nav2-lidar3d-onboard/"
       ssh -tt -o BatchMode=yes -o ServerAliveInterval=2 -o ServerAliveCountMax=2 -S "$ssh_socket" "$target" \
-        'exec bash ~/go2-nav2-lidar3d-onboard/robot-motion-wifi.sh' >"$log_dir/motion.log" 2>&1 &
+        "GO2_SPORT_WALK_MODE=${GO2_SPORT_WALK_MODE:-free} GO2_SPORT_AVOID=${GO2_SPORT_AVOID:-0} GO2_SPORT_AUTO_RECOVERY=${GO2_SPORT_AUTO_RECOVERY:-1} exec bash ~/go2-nav2-lidar3d-onboard/robot-motion-wifi.sh" >"$log_dir/motion.log" 2>&1 &  # go2-agri: walk mode (wifi_3d_nav.sh --semantic: classic)
       motion_pid=$!
     fi
     docker exec -e GO2_HOST_IP="$robot_host_ip" -e GO2_ROBOT_IP="$robot_ip" -e GO2_RELAY_DOMAIN_ID="$relay_domain" \
@@ -202,7 +217,9 @@ if [[ "$mapping_mode" == lidar3d && "$compute" == jetson ]]; then
       >"$log_dir/rviz.log" 2>&1 &
     viz_pid=$!
     set +e
-    if [[ -n "$motion_pid" ]]; then
+    if [[ -n "${GO2_KEEPALIVE:-}" && -f "$GO2_KEEPALIVE" ]]; then  # go2-agri: keep session
+      source "$GO2_KEEPALIVE"; go2_keepalive_wait  # go2-agri: keep session
+    elif [[ -n "$motion_pid" ]]; then
       wait -n "$mapping_pid" "$viz_pid" "$motion_pid"
     else
       wait -n "$mapping_pid" "$viz_pid"
@@ -235,7 +252,7 @@ if [[ "$mapping_mode" == lidar3d ]]; then
   fi
 fi
 ssh -tt -o BatchMode=yes -o ServerAliveInterval=3 -o ServerAliveCountMax=3 -S "$ssh_socket" "$target" \
-  "exec env GO2_HOST_IP=$robot_host_ip GO2_RELAY_DOMAIN_ID=$relay_domain GO2_RELAY_PROFILE=$relay_profile GO2_RELAY_CAMERA=$relay_camera $relay_trace_env bash $relay_script --sensors-only" \
+  "exec env GO2_LIDAR3D_RAW=${GO2_LIDAR3D_RAW:-0} GO2_HOST_IP=$robot_host_ip GO2_RELAY_DOMAIN_ID=$relay_domain GO2_RELAY_PROFILE=$relay_profile GO2_RELAY_CAMERA=$relay_camera $relay_trace_env bash $relay_script --sensors-only" \
   >"$log_dir/relay.log" 2>&1 &
 relay_pid=$!
 for ((attempt=0; attempt<300; attempt++)); do

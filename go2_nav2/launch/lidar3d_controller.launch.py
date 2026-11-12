@@ -32,8 +32,10 @@ def configure(context):
         'primary_controller': 'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController',
         # Wider hysteresis: rotate in place only for large errors, hand back early.
         'angular_dist_threshold': 0.5, 'angular_disengage_threshold': 0.2,
-        'forward_sampling_distance': 0.5, 'rotate_to_heading_angular_vel': 0.6,
-        'max_angular_accel': 1.0, 'simulate_ahead_time': 1.0,
+        # Slow turns: gyro-only Point-LIO lost its gravity direction (map tilted
+        # 17.7 deg) in a 230 deg walking turn at 25-28 deg/s (run 2026-10-29 18:19).
+        'forward_sampling_distance': 0.5, 'rotate_to_heading_angular_vel': 0.3,
+        'max_angular_accel': 0.6, 'simulate_ahead_time': 1.0,
         'rotate_to_goal_heading': False, 'closed_loop': False,
         'desired_linear_vel': 0.30,
         'lookahead_dist': 0.6, 'min_lookahead_dist': 0.4, 'max_lookahead_dist': 0.9,
@@ -56,7 +58,7 @@ def configure(context):
     with open(pkg + '/config/go2_footprint.yaml') as stream:
         cost.update(yaml.safe_load(stream))
     cost.pop('robot_radius', None)
-    cost['obstacle_layer']['lidar']['expected_update_rate'] = 0.8
+    cost['obstacle_layer']['lidar']['expected_update_rate'] = 2.0  # go2-wifi-lidar was: cost['obstacle_layer']['lidar']['expected_update_rate'] = 0.8
     cost['obstacle_layer']['lidar']['topic'] = '/lidar3d/obstacle_points'
     cost['inflation_layer']['inflation_radius'] = 0.22
     fd, path = tempfile.mkstemp(prefix='go2-lidar3d-controller-', suffix='.yaml')
@@ -83,8 +85,9 @@ def configure(context):
              parameters=[{
                  'smoothing_frequency': 20.0, 'scale_velocities': True,
                  'feedback': 'OPEN_LOOP',  # never trust the noisy measured twist
-                 'max_velocity': [0.30, 0.0, 0.70], 'min_velocity': [-0.30, 0.0, -0.70],
-                 'max_accel': [0.5, 0.0, 0.8], 'max_decel': [-0.5, 0.0, -0.8],
+                 # Turn rate capped at 0.35 rad/s (20 deg/s): see the shim note above.
+                 'max_velocity': [0.30, 0.0, 0.35], 'min_velocity': [-0.30, 0.0, -0.35],
+                 'max_accel': [0.5, 0.0, 0.5], 'max_decel': [-0.5, 0.0, -0.5],
                  # Go2 steps in place on tiny commands; zero them instead.
                  'deadband_velocity': [0.03, 0.0, 0.08],
                  'velocity_timeout': 1.0}]),

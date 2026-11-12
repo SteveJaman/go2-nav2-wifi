@@ -42,17 +42,17 @@ global_costmap:
           # FIX: Lowered min height to 0.12 to catch cabinet bases and chair legs
           min_obstacle_height: 0.12  
           max_obstacle_height: 1.5
-          obstacle_min_range: 0.35
+          obstacle_min_range: 0.15
           obstacle_max_range: 12.0
-          raytrace_min_range: 0.35
-          raytrace_max_range: 12.0
+          raytrace_min_range: 0.15
+          raytrace_max_range: 12.0   # relax-costmap.sh: clear as far as it marks (was 5)
           observation_persistence: 0.0
           
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         # FIX: 0.75 is a good balance. If it still hits, try 0.85. If it gets stuck in doors, try 0.65.
         inflation_radius: 0.55
-        cost_scaling_factor: 2.5 
+        cost_scaling_factor: 5.0   # relax-costmap.sh: faster cost decay (was 2.5)
         
       always_send_full_costmap: true
 
@@ -100,6 +100,6 @@ local_costmap:
         plugin: nav2_costmap_2d::InflationLayer
         # FIX: Matches global costmap inflation
         inflation_radius: 0.75
-        cost_scaling_factor: 2.5
+        cost_scaling_factor: 5.0   # relax-costmap.sh: faster cost decay (was 2.5)
         
       always_send_full_costmap: true

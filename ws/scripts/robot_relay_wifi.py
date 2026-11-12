@@ -209,6 +209,28 @@ def _remove_paths(*paths: str) -> None:
             pass
 
 
+def _go2_slim_cloud(raw: bytes) -> bytes:  # go2-wifi-lidar
+    """x y z intensity only: Point-LIO's PointXYZINormal is 48 B/point, this is 16."""  # go2-wifi-lidar
+    try:  # go2-wifi-lidar
+        import numpy as np  # go2-wifi-lidar
+        from sensor_msgs.msg import PointCloud2, PointField  # go2-wifi-lidar
+        msg = deserialize_message(raw, PointCloud2)  # go2-wifi-lidar
+        fields = {f.name: f for f in msg.fields}  # go2-wifi-lidar
+        keep = [n for n in ('x', 'y', 'z', 'intensity') if n in fields  # go2-wifi-lidar
+                and fields[n].datatype == PointField.FLOAT32 and fields[n].count == 1]  # go2-wifi-lidar
+        if keep[:3] != ['x', 'y', 'z'] or msg.is_bigendian or msg.point_step <= 4 * len(keep):  # go2-wifi-lidar
+            return raw  # go2-wifi-lidar
+        rows = np.frombuffer(bytes(msg.data), np.uint8).reshape(msg.height, msg.row_step)  # go2-wifi-lidar
+        points = rows[:, :msg.width * msg.point_step].reshape(-1, msg.point_step)  # go2-wifi-lidar
+        cols = np.concatenate([np.arange(fields[n].offset, fields[n].offset + 4) for n in keep])  # go2-wifi-lidar
+        msg.data = points[:, cols].tobytes()  # go2-wifi-lidar
+        msg.fields = [PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32, count=1)  # go2-wifi-lidar
+                      for i, n in enumerate(keep)]  # go2-wifi-lidar
+        msg.point_step = 4 * len(keep)  # go2-wifi-lidar
+        msg.row_step = msg.point_step * msg.width  # go2-wifi-lidar
+        return serialize_message(msg)  # go2-wifi-lidar
+    except Exception:  # go2-wifi-lidar
+        return raw  # never drop a scan because slimming failed  # go2-wifi-lidar
 def _run_subscriber(socket_path: str, ready_path: str, topics: List, name: str) -> None:
     rclpy.init()
     node = Node(name)
@@ -243,6 +265,8 @@ def _run_subscriber(socket_path: str, ready_path: str, topics: List, name: str) 
                     wall, mono = time.time_ns(), time.monotonic_ns()
                 # Visualization is already CDR. Skip Python reconstruction of the
                 # growing Path for frames that will not be sent over Wi-Fi.
+                if isinstance(msg, bytes) and topics[topic_id][0] == '/lidar3d/registered':  # go2-wifi-lidar
+                    msg = _go2_slim_cloud(msg)  # go2-wifi-lidar
                 payload = msg if isinstance(msg, bytes) else serialize_message(msg)
                 if trace is not None and hasattr(msg, 'header'):
                     stamp = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
@@ -286,6 +310,9 @@ def _run_publisher(socket_path: str, ready_path: str, topics: List, name: str) -
         for topic, type_str, qos_kind in topics:
             msg_type = get_message(type_str)
             types.append(msg_type)
+            if os.environ.get("GO2_LIDAR3D_RAW") == "1" and topic in (  # go2-agri: lidar3d raw
+                    "/lidar3d/odom", "/lidar3d/registered", "/lidar3d/path"):  # go2-agri: lidar3d raw
+                topic = "/lidar3d/raw/" + topic.rsplit("/", 1)[1]  # go2-agri: lidar3d raw
             pubs.append(node.create_publisher(msg_type, topic, _qos(qos_kind)))
             node.get_logger().info(f"publish {topic} ({type_str})")
         server = _listen(socket_path, ready_path)
